@@ -1,0 +1,27 @@
+[
+  {
+    "name": "DEV.to",
+    "url": "https://dev.to/t/claudecode",
+    "type": "html"
+  },
+  {
+    "name": "Reddit r/ClaudeAI",
+    "url": "https://www.reddit.com/r/ClaudeAI/.json?limit=50",
+    "type": "json"
+  },
+  {
+    "name": "GitHub Cheatsheet",
+    "url": "https://raw.githubusercontent.com/Njengah/claude-code-cheat-sheet/main/README.md",
+    "type": "markdown"
+  },
+  {
+    "name": "Sabrina.dev",
+    "url": "https://www.sabrina.dev",
+    "type": "html"
+  },
+  {
+    "name": "Anthropic Blog",
+    "url": "https://www.anthropic.com/news",
+    "type": "html"
+  }
+]
