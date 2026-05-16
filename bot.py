@@ -27,7 +27,7 @@ USER_AGENT = "claude-code-tips-bot/1.0 (+https://github.com/user/claude-code-tip
 REQUEST_TIMEOUT = 15
 RETRY_COUNT = 3
 RETRY_BACKOFF = 2.0
-MAX_TIPS_PER_RUN = 10
+MAX_TIPS_PER_RUN = 3
 SEEN_TIPS_PATH = "seen_tips.json"
 SOURCES_PATH = "sources.json"
 
@@ -409,11 +409,50 @@ def _scrape_html_generic(source: dict) -> list[dict]:
     return tips
 
 
-def _fetch_article_summary(url: str) -> str:
-    """URLのページ本文を取得して要約テキストを返す（翻訳前の生テキスト）"""
-    # HackerNewsのコメントページはスキップしてそのURLのまま
-    if "news.ycombinator.com/item" in url:
-        return ""
+_JA_ACTION_PATTERNS = re.compile(
+    r'.{10,}(?:できる|できます|使える|活用できる|可能|実現できる|設定できる|登録できる|自動化できる|効率化できる|生成できる|管理できる)[。．]?'
+)
+_EN_ACTION_PATTERNS = re.compile(
+    r'(?:you can|allows? you to|enables? you to|use .{3,30} to|lets? you|helps? you).{10,}[.!]',
+    re.IGNORECASE,
+)
+
+
+def _extract_one_liner(raw_text: str, title: str) -> str:
+    """本文から「何を使って何ができるか」が伝わる1文を抽出する"""
+    text = _clean_text(raw_text)
+    is_japanese = len(re.findall(r'[぀-鿿]', text)) > len(text) * 0.1
+
+    if is_japanese:
+        # 日本語: アクション動詞を含む文を優先
+        sentences = re.split(r'[。\n]', text)
+        for sent in sentences:
+            sent = sent.strip()
+            if 20 < len(sent) < 120 and _JA_ACTION_PATTERNS.search(sent):
+                return sent
+        # フォールバック: 最初の意味ある文
+        for sent in sentences:
+            sent = sent.strip()
+            if len(sent) > 20:
+                return sent[:100]
+    else:
+        # 英語: "you can / use X to Y" パターンを優先
+        sentences = re.split(r'[.!\n]', text)
+        for sent in sentences:
+            sent = sent.strip()
+            if 20 < len(sent) < 200 and _EN_ACTION_PATTERNS.search(sent):
+                return sent[:150]
+        # フォールバック
+        for sent in sentences:
+            sent = sent.strip()
+            if len(sent) > 20:
+                return sent[:150]
+
+    return title[:100]
+
+
+def _fetch_article_text(url: str) -> str:
+    """URLのページ本文を取得してプレーンテキストを返す"""
     if not _is_allowed_by_robots(url):
         return ""
     resp = _get(url)
@@ -423,48 +462,100 @@ def _fetch_article_summary(url: str) -> str:
     for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
         tag.decompose()
 
-    # TL;DR / まとめ / ポイント セクションを優先して探す
-    tl_dr_patterns = ["tl;dr", "tldr", "まとめ", "ポイント", "概要", "結論", "要約"]
-    for heading in soup.find_all(["h2", "h3", "h4", "strong", "b"]):
-        text = heading.get_text(strip=True).lower()
-        if any(p in text for p in tl_dr_patterns):
-            # 直後の要素を取得
-            sibling = heading.find_next_sibling()
-            if sibling:
-                content = sibling.get_text(strip=True)
+    # TL;DR・まとめセクションを最優先
+    for heading in soup.find_all(["h2", "h3", "strong"]):
+        label = heading.get_text(strip=True).lower()
+        if any(p in label for p in ["tl;dr", "tldr", "まとめ", "ポイント", "概要", "結論"]):
+            nxt = heading.find_next_sibling()
+            if nxt:
+                content = nxt.get_text(strip=True)
                 if len(content) > 20:
-                    return content[:600]
+                    return content[:500]
 
-    # 箇条書きの最初のいくつかを収集（tips記事に多い）
-    items = soup.find_all("li")
-    tip_items = [li.get_text(strip=True) for li in items[:5] if len(li.get_text(strip=True)) > 20]
-    if len(tip_items) >= 2:
-        return " / ".join(tip_items[:3])[:600]
-
-    # メインコンテンツの最初の段落を使う
     main_el = soup.find("main") or soup.find("article") or soup
-    paragraphs = main_el.find_all("p")
-    meaningful = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 40]
-    if meaningful:
-        return " ".join(meaningful[:2])[:600]
-
-    return ""
+    paragraphs = [p.get_text(strip=True) for p in main_el.find_all("p") if len(p.get_text(strip=True)) > 30]
+    return " ".join(paragraphs[:3])[:500]
 
 
 def enrich_with_article_content(tips: list[dict]) -> list[dict]:
-    """各tipのURLを実際に取得してsummaryを本文ベースに更新する"""
+    """各tipのURLを取得して「何を使って何ができるか」の1行サマリーに更新する"""
     enriched: list[dict] = []
     for tip in tips:
         logger.info("Fetching article: %s", tip["title"])
-        raw = _fetch_article_summary(tip["url"])
+        raw = _fetch_article_text(tip["url"])
+        one_liner = ""
         if raw and len(raw) > 30:
-            # GitHub cheatsheetは既に内容が確定しているのでスキップ
-            if "github.com/Njengah" not in tip["url"]:
-                ja = _truncate(_translate_to_ja(_clean_text(raw)))
-                enriched.append({**tip, "summary": ja})
-                continue
-        enriched.append(tip)
+            one_liner = _extract_one_liner(raw, "")
+        # 取れなかった or タイトルの繰り返しになっている場合はタイトルを加工
+        if not one_liner or one_liner.lower().strip() == tip["title"].lower().strip()[:len(one_liner)]:
+            one_liner = tip["title"]
+        is_ja = len(re.findall(r'[぀-鿿]', one_liner)) > 3
+        summary = one_liner if is_ja else _translate_to_ja(one_liner)
+        enriched.append({**tip, "summary": _truncate(summary)})
     return enriched
+
+
+def _scrape_simon_willison(source: dict) -> list[dict]:
+    """Simon WillisonのAtomフィードからClaude Code tips記事のみ収集"""
+    url = source["url"]
+    resp = _get(url)
+    if resp is None:
+        return []
+    soup = BeautifulSoup(resp.text, "lxml-xml")
+    tips: list[dict] = []
+    for entry in soup.find_all("entry")[:40]:
+        title_el = entry.find("title")
+        link_el = entry.find("link")
+        summary_el = entry.find("summary") or entry.find("content")
+        title = title_el.get_text(strip=True) if title_el else ""
+        # #atom-everything などフラグメントを除去
+        raw_link = link_el.get("href", "") if link_el else ""
+        link = raw_link.split("#")[0]
+        summary = _clean_text(summary_el.get_text(strip=True)[:300]) if summary_el else title
+        if not title or not link:
+            continue
+        # Simon Willisonはtips記事に限定（claude codeに直接言及しているものだけ）
+        combined = (title + " " + summary).lower()
+        if "claude code" not in combined and "claude-code" not in combined:
+            continue
+        if not _is_tip_content(title, summary):
+            continue
+        tips.append(_make_tip_ja(title, link, summary, source["name"]))
+    return tips
+
+
+def _scrape_anthropic_cookbook(source: dict) -> list[dict]:
+    """Anthropic CookbookのREADMEからノートブック・実践例のみ収集"""
+    url = source["url"]
+    resp = _get(url)
+    if resp is None:
+        return []
+    tips: list[dict] = []
+    current_section = ""
+    page_base = "https://github.com/anthropics/anthropic-cookbook/blob/main"
+    skip_sections = {"further reading", "resources", "documentation", "ドキュメント"}
+    for line in resp.text.splitlines():
+        if line.startswith("## ") or line.startswith("### "):
+            current_section = _clean_text(line.lstrip("#").strip())
+        elif line.startswith("- ") or line.startswith("* "):
+            if current_section.lower() in skip_sections:
+                continue
+            content = line.lstrip("-* ").strip()
+            m = re.match(r'\[([^\]]+)\]\(([^)]+)\)', content)
+            if not m:
+                continue
+            title = m.group(1).strip()
+            href = m.group(2).strip()
+            # ipynbかmdのみ（実際のノートブック・ガイド）
+            if not (href.endswith(".ipynb") or href.endswith(".md")):
+                continue
+            if not href.startswith("http"):
+                href = page_base + "/" + href.lstrip("./")
+            desc_match = re.search(r'\)\s*[-–—:]\s*(.+)', content)
+            summary = desc_match.group(1).strip() if desc_match else title
+            summary = _make_concrete_summary(current_section, _clean_text(summary))
+            tips.append(_make_tip(title, href, summary, source["name"]))
+    return tips
 
 
 _SCRAPER_MAP = {
@@ -473,6 +564,8 @@ _SCRAPER_MAP = {
     "markdown": _scrape_github_markdown,
     "hackernews": _scrape_hackernews,
     "rss": _scrape_zenn,
+    "atom": _scrape_simon_willison,
+    "cookbook": _scrape_anthropic_cookbook,
 }
 
 
@@ -532,7 +625,6 @@ def format_message(tips: list[dict], today: str) -> dict:
     for i, tip in enumerate(tips, 1):
         lines.append(
             f"\n{i}. 💡 *{tip['title']}*\n"
-            f"　{tip['summary']}\n"
             f"　📂 {tip['category']}　🔗 {tip['url']}"
         )
     return {
@@ -607,7 +699,6 @@ def main() -> None:
             return
 
         best = select_best(new_tips)
-        best = enrich_with_article_content(best)
 
         payload = format_message(best, today_str)
         success = post_to_slack(payload, webhook_url)

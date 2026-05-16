@@ -1,17 +1,12 @@
 [
   {
-    "name": "GitHub Cheatsheet",
-    "url": "https://raw.githubusercontent.com/Njengah/claude-code-cheat-sheet/main/README.md",
-    "type": "markdown"
-  },
-  {
-    "name": "Hacker News",
-    "url": "https://hn.algolia.com/api/v1/search?query=claude+code+tips&tags=story&hitsPerPage=30",
-    "type": "hackernews"
-  },
-  {
     "name": "Zenn",
     "url": "https://zenn.dev/topics/claudecode/feed",
     "type": "rss"
+  },
+  {
+    "name": "Simon Willison",
+    "url": "https://simonwillison.net/atom/everything/",
+    "type": "atom"
   }
 ]
