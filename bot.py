@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from deep_translator import GoogleTranslator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +46,9 @@ CLAUDE_CODE_KEYWORDS = [
     "/project",
     "/memory",
     "/compact",
+    "/clear",
+    "/help",
+    "/review",
     "mcp",
     "claude.md",
     "slash command",
@@ -57,6 +61,54 @@ CLAUDE_CODE_KEYWORDS = [
     "hack",
     "workflow",
     "productivity",
+]
+
+TIP_INDICATORS = [
+    "how to",
+    "tip",
+    "trick",
+    "shortcut",
+    "you can",
+    "use ",
+    "using ",
+    "enable",
+    "command",
+    "workflow",
+    "cheat",
+    "guide",
+    "tutorial",
+    "best practice",
+    "pro tip",
+    "hidden",
+    "feature",
+    "prompt",
+    "slash",
+    "config",
+    "setup",
+]
+
+NON_TIP_INDICATORS = [
+    "rant",
+    "complaint",
+    "broken",
+    "not working",
+    "bug",
+    "issue",
+    "problem",
+    "error",
+    "fail",
+    "anyone else",
+    "why does",
+    "why is",
+    "is it just me",
+    "frustrated",
+    "disappointed",
+    "concerning",
+    "cracked",
+    "sleep",
+    "bedtime",
+    "slower",
+    "worse",
 ]
 
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
@@ -113,9 +165,26 @@ def _guess_category(text: str) -> str:
 def _score(tip: dict) -> float:
     text = (tip.get("title", "") + " " + tip.get("summary", "")).lower()
     score = sum(1.0 for kw in CLAUDE_CODE_KEYWORDS if kw in text)
+    score += sum(0.8 for kw in TIP_INDICATORS if kw in text)
+    score -= sum(2.0 for kw in NON_TIP_INDICATORS if kw in text)
     if tip.get("category") != "CLI":
         score += 0.5
     return score
+
+
+def _is_tip_content(title: str, summary: str) -> bool:
+    text = (title + " " + summary).lower()
+    has_tip = any(kw in text for kw in TIP_INDICATORS)
+    has_noise = sum(1 for kw in NON_TIP_INDICATORS if kw in text) >= 2
+    return has_tip and not has_noise
+
+
+def _clean_text(text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [label](url) → label
+    text = re.sub(r"https?://\S+", "", text)               # 生URL除去
+    text = re.sub(r"[*_`#~]", "", text)                    # Markdown記号除去
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _truncate(text: str, max_len: int = 150) -> str:
@@ -123,12 +192,41 @@ def _truncate(text: str, max_len: int = 150) -> str:
     return text[:max_len] if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
+def _make_concrete_summary(section: str, content: str) -> str:
+    """GitHub Cheatsheet の箇条書きを「〜することができます」形式に整形する"""
+    content = _clean_text(content)
+    section = _clean_text(section)
+    if not content:
+        return section
+    verb_phrases = ["use ", "run ", "type ", "press ", "add ", "set ", "enable ", "create "]
+    lower = content.lower()
+    if any(lower.startswith(v) for v in verb_phrases):
+        return f"【{section}】{content}"
+    return f"【{section}】{content}"
+
+
+def _translate_to_ja(text: str) -> str:
+    if not text or not text.strip():
+        return text
+    try:
+        translator = GoogleTranslator(source="auto", target="ja")
+        result = translator.translate(text[:4999])  # API上限5000文字
+        return result if result else text
+    except Exception as exc:
+        logger.warning("Translation failed, using original: %s", exc)
+        return text
+
+
 def _make_tip(title: str, url: str, summary: str, source: str) -> dict:
-    category = _guess_category(title + " " + summary)
+    clean_title = _clean_text(title.strip())
+    clean_summary = _clean_text(summary)
+    category = _guess_category(clean_title + " " + clean_summary)
+    ja_title = _translate_to_ja(clean_title)
+    ja_summary = _truncate(_translate_to_ja(clean_summary))
     tip = {
-        "title": title.strip(),
+        "title": ja_title,
         "url": url.strip(),
-        "summary": _truncate(summary),
+        "summary": ja_summary,
         "category": category,
         "source": source,
         "score": 0.0,
@@ -177,13 +275,15 @@ def _scrape_reddit(source: dict) -> list[dict]:
         return []
     posts = data.get("data", {}).get("children", [])
     tips: list[dict] = []
-    for post in posts[:30]:
+    for post in posts[:50]:
         pd = post.get("data", {})
         title: str = pd.get("title", "")
         permalink: str = pd.get("permalink", "")
         full_url = "https://www.reddit.com" + permalink if permalink else pd.get("url", "")
         selftext: str = pd.get("selftext", "")
-        summary = selftext if selftext else title
+        summary = selftext[:500] if selftext else title
+        if not _is_tip_content(title, summary):
+            continue
         tips.append(_make_tip(title, full_url, summary, source["name"]))
     return tips
 
@@ -196,17 +296,83 @@ def _scrape_github_markdown(source: dict) -> list[dict]:
     lines = resp.text.splitlines()
     tips: list[dict] = []
     current_section = ""
+    page_url = "https://github.com/Njengah/claude-code-cheat-sheet"
     for line in lines:
         if line.startswith("## ") or line.startswith("### "):
-            current_section = line.lstrip("#").strip()
+            current_section = _clean_text(line.lstrip("#").strip())
         elif line.startswith("- ") or line.startswith("* "):
-            content = line.lstrip("-* ").strip()
+            content = _clean_text(line.lstrip("-* ").strip())
             if len(content) < 10:
                 continue
-            page_url = "https://github.com/Njengah/claude-code-cheat-sheet"
-            summary = f"{current_section}: {content}" if current_section else content
+            # リンクだけの行・リソース紹介行はスキップ
+            lower_content = content.lower()
+            if content.startswith("http") or lower_content.startswith("resource") or lower_content.startswith("further") or lower_content.startswith("more "):
+                continue
+            summary = _make_concrete_summary(current_section, content)
             tips.append(_make_tip(content[:100], page_url, summary, source["name"]))
     return tips
+
+
+def _scrape_hackernews(source: dict) -> list[dict]:
+    url = source["url"]
+    resp = _get(url, extra_headers={"Accept": "application/json"})
+    if resp is None:
+        return []
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        logger.warning("HN JSON parse error: %s", exc)
+        return []
+    tips: list[dict] = []
+    for hit in data.get("hits", []):
+        title: str = hit.get("title", "")
+        story_url: str = hit.get("url", "") or f"https://news.ycombinator.com/item?id={hit.get('objectID', '')}"
+        raw_text: str = hit.get("story_text", "") or ""
+        if raw_text:
+            raw_text = BeautifulSoup(raw_text, "lxml").get_text(strip=True)[:500]
+        summary = raw_text or title
+        if not _is_tip_content(title, summary):
+            continue
+        tips.append(_make_tip(title, story_url, summary, source["name"]))
+    return tips
+
+
+def _scrape_zenn(source: dict) -> list[dict]:
+    url = source["url"]
+    resp = _get(url)
+    if resp is None:
+        return []
+    soup = BeautifulSoup(resp.text, "lxml-xml")
+    tips: list[dict] = []
+    for item in soup.find_all("item")[:20]:
+        title_el = item.find("title")
+        link_el = item.find("link")
+        desc_el = item.find("description")
+        title = title_el.get_text(strip=True) if title_el else ""
+        link = link_el.get_text(strip=True) if link_el else ""
+        summary = _clean_text(desc_el.get_text(strip=True)) if desc_el else title
+        if not title or not link:
+            continue
+        # Zennは日本語コンテンツなので翻訳をスキップ
+        tips.append(_make_tip_ja(title, link, _truncate(summary), source["name"]))
+    return tips
+
+
+def _make_tip_ja(title: str, url: str, summary: str, source: str) -> dict:
+    """日本語コンテンツ用: 翻訳をスキップして直接格納する"""
+    clean_title = _clean_text(title.strip())
+    clean_summary = _clean_text(summary)
+    category = _guess_category(clean_title + " " + clean_summary)
+    tip = {
+        "title": clean_title,
+        "url": url.strip(),
+        "summary": _truncate(clean_summary),
+        "category": category,
+        "source": source,
+        "score": 0.0,
+    }
+    tip["score"] = _score(tip)
+    return tip
 
 
 def _scrape_html_generic(source: dict) -> list[dict]:
@@ -247,6 +413,8 @@ _SCRAPER_MAP = {
     "html": _scrape_html_generic,
     "json": _scrape_reddit,
     "markdown": _scrape_github_markdown,
+    "hackernews": _scrape_hackernews,
+    "rss": _scrape_zenn,
 }
 
 
@@ -289,7 +457,15 @@ def filter_seen(tips: list[dict]) -> list[dict]:
 
 def select_best(tips: list[dict], n: int = MAX_TIPS_PER_RUN) -> list[dict]:
     scored = sorted(tips, key=lambda t: t["score"], reverse=True)
-    return scored[:n]
+    seen_urls: set[str] = set()
+    deduped: list[dict] = []
+    for tip in scored:
+        if tip["url"] not in seen_urls:
+            seen_urls.add(tip["url"])
+            deduped.append(tip)
+        if len(deduped) >= n:
+            break
+    return deduped
 
 
 def format_message(tip: dict, index: int, total: int, today: str) -> dict:

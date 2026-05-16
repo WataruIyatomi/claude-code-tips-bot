@@ -1,27 +1,17 @@
 [
   {
-    "name": "DEV.to",
-    "url": "https://dev.to/t/claudecode",
-    "type": "html"
-  },
-  {
-    "name": "Reddit r/ClaudeAI",
-    "url": "https://www.reddit.com/r/ClaudeAI/.json?limit=50",
-    "type": "json"
-  },
-  {
     "name": "GitHub Cheatsheet",
     "url": "https://raw.githubusercontent.com/Njengah/claude-code-cheat-sheet/main/README.md",
     "type": "markdown"
   },
   {
-    "name": "Sabrina.dev",
-    "url": "https://www.sabrina.dev",
-    "type": "html"
+    "name": "Hacker News",
+    "url": "https://hn.algolia.com/api/v1/search?query=claude+code+tips&tags=story&hitsPerPage=30",
+    "type": "hackernews"
   },
   {
-    "name": "Anthropic Blog",
-    "url": "https://www.anthropic.com/news",
-    "type": "html"
+    "name": "Zenn",
+    "url": "https://zenn.dev/topics/claudecode/feed",
+    "type": "rss"
   }
 ]
