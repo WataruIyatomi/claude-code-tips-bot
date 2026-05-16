@@ -526,20 +526,20 @@ def select_best(tips: list[dict], n: int = MAX_TIPS_PER_RUN) -> list[dict]:
     return deduped
 
 
-def format_message(tip: dict, index: int, total: int, today: str) -> dict:
-    header = f"🧠 Claude Code Tips — 今日の{total}本 ({today})  [{index}/{total}]"
-    text = (
-        f"{header}\n"
-        f"💡 {tip['title']}\n"
-        f"{tip['summary']}\n"
-        f"📂 カテゴリ: {tip['category']}\n"
-        f"🔗 ソース: {tip['url']}"
-    )
+def format_message(tips: list[dict], today: str) -> dict:
+    total = len(tips)
+    lines = [f"🧠 *Claude Code Tips — 今日の{total}本* ({today})"]
+    for i, tip in enumerate(tips, 1):
+        lines.append(
+            f"\n{i}. 💡 *{tip['title']}*\n"
+            f"　{tip['summary']}\n"
+            f"　📂 {tip['category']}　🔗 {tip['url']}"
+        )
     return {
         "blocks": [
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": text},
+                "text": {"type": "mrkdwn", "text": "\n".join(lines)},
             }
         ]
     }
@@ -608,24 +608,16 @@ def main() -> None:
 
         best = select_best(new_tips)
         best = enrich_with_article_content(best)
-        total = len(best)
-        failed_count = 0
 
-        for i, tip in enumerate(best, start=1):
-            payload = format_message(tip, i, total, today_str)
-            success = post_to_slack(payload, webhook_url)
-            if not success:
-                logger.error("Failed to post tip %d/%d: %s", i, total, tip["url"])
-                failed_count += 1
-            else:
-                logger.info("Posted tip %d/%d: %s", i, total, tip["title"])
-
-        update_seen(best)
-        logger.info("Updated seen_tips.json with %d entries", total)
-
-        if failed_count > 0:
-            logger.error("%d/%d posts failed", failed_count, total)
+        payload = format_message(best, today_str)
+        success = post_to_slack(payload, webhook_url)
+        if not success:
+            logger.error("Failed to post tips to Slack")
             sys.exit(1)
+
+        logger.info("Posted %d tips to Slack", len(best))
+        update_seen(best)
+        logger.info("Updated seen_tips.json with %d entries", len(best))
 
     except Exception as exc:
         logger.exception("Unexpected error: %s", exc)
