@@ -409,6 +409,64 @@ def _scrape_html_generic(source: dict) -> list[dict]:
     return tips
 
 
+def _fetch_article_summary(url: str) -> str:
+    """URLのページ本文を取得して要約テキストを返す（翻訳前の生テキスト）"""
+    # HackerNewsのコメントページはスキップしてそのURLのまま
+    if "news.ycombinator.com/item" in url:
+        return ""
+    if not _is_allowed_by_robots(url):
+        return ""
+    resp = _get(url)
+    if resp is None:
+        return ""
+    soup = BeautifulSoup(resp.text, "lxml")
+    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
+        tag.decompose()
+
+    # TL;DR / まとめ / ポイント セクションを優先して探す
+    tl_dr_patterns = ["tl;dr", "tldr", "まとめ", "ポイント", "概要", "結論", "要約"]
+    for heading in soup.find_all(["h2", "h3", "h4", "strong", "b"]):
+        text = heading.get_text(strip=True).lower()
+        if any(p in text for p in tl_dr_patterns):
+            # 直後の要素を取得
+            sibling = heading.find_next_sibling()
+            if sibling:
+                content = sibling.get_text(strip=True)
+                if len(content) > 20:
+                    return content[:600]
+
+    # 箇条書きの最初のいくつかを収集（tips記事に多い）
+    items = soup.find_all("li")
+    tip_items = [li.get_text(strip=True) for li in items[:5] if len(li.get_text(strip=True)) > 20]
+    if len(tip_items) >= 2:
+        return " / ".join(tip_items[:3])[:600]
+
+    # メインコンテンツの最初の段落を使う
+    main_el = soup.find("main") or soup.find("article") or soup
+    paragraphs = main_el.find_all("p")
+    meaningful = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 40]
+    if meaningful:
+        return " ".join(meaningful[:2])[:600]
+
+    return ""
+
+
+def enrich_with_article_content(tips: list[dict]) -> list[dict]:
+    """各tipのURLを実際に取得してsummaryを本文ベースに更新する"""
+    enriched: list[dict] = []
+    for tip in tips:
+        logger.info("Fetching article: %s", tip["title"])
+        raw = _fetch_article_summary(tip["url"])
+        if raw and len(raw) > 30:
+            # GitHub cheatsheetは既に内容が確定しているのでスキップ
+            if "github.com/Njengah" not in tip["url"]:
+                ja = _truncate(_translate_to_ja(_clean_text(raw)))
+                enriched.append({**tip, "summary": ja})
+                continue
+        enriched.append(tip)
+    return enriched
+
+
 _SCRAPER_MAP = {
     "html": _scrape_html_generic,
     "json": _scrape_reddit,
@@ -549,6 +607,7 @@ def main() -> None:
             return
 
         best = select_best(new_tips)
+        best = enrich_with_article_content(best)
         total = len(best)
         failed_count = 0
 
