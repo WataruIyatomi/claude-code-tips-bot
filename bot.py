@@ -621,7 +621,7 @@ def select_best(tips: list[dict], n: int = MAX_TIPS_PER_RUN) -> list[dict]:
 
 def format_message(tips: list[dict], today: str) -> dict:
     total = len(tips)
-    lines = [f"🧠 *Claude Code Tips — 今日の{total}本* ({today})"]
+    lines = [f"🧠 *AI Articles — 今日の{total}本* ({today})"]
     for i, tip in enumerate(tips, 1):
         lines.append(
             f"\n{i}. 💡 *{tip['title']}*\n"
